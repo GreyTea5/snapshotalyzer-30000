@@ -1,4 +1,5 @@
 import boto3
+import botocore
 import click
 
 session = boto3.Session(profile_name='shotty')
@@ -13,6 +14,10 @@ def filter_instances(project):
         instances = ec2.instances.all()
     return instances
 
+def has_pending_snapshot(volume):
+    snapshots = list(volume.snapshots.all())
+    return snapshots and snapshots[0].state == 'pending'
+
 @click.group()
 def cli():
     """Shotty manages snapshots"""
@@ -22,7 +27,9 @@ def snapshots():
     """Commands for snapshots"""
 @snapshots.command('list')
 @click.option('--project', default=None, help='Filter by project name')
-def list_snapshots(project):
+@click.option('--all', 'list_all', default=False, is_flag=True,
+    help="List all snapshots for each volumes, not just the most recent")
+def list_snapshots(project, list_all):
     "List ec2 snapshots"
 
     instances = filter_instances(project)
@@ -37,6 +44,8 @@ def list_snapshots(project):
                 s.progress,
                 s.start_time.strftime("%c")
                 )))
+
+                if s.state == 'completed' and not list_all: break
     return
 
 @cli.group('volumes')
@@ -91,24 +100,32 @@ def stop_instances(project):
 
     for i in instances:
         print("Stopping {0}...".format(i.id))
-        i.stop()
+        try:
+            i.stop()
+        except botocore.exceptions.ClientError as e:
+            print("Could not stop {0} ".format(i.id) + str(e))
+        continue
 
     return
 
 @instances.command('start')
 @click.option('--project', default=None,
                 help='Only instances for project')
-def stop_instances(project):
+def start_instances(project):
     "Stop ec2 instances"
     instances = filter_instances(project)
 
     for i in instances:
         print("Starting {0}...".format(i.id))
-        i.start()
+        try:
+            i.start()
+        except botocore.exceptions.ClientError as e:
+            print("Could not start {0} ".format(i.id) + str(e))
+        continue
 
     return
 
-@instances.command('snapshot' help="Create snapshots of all instances")
+@instances.command('snapshot')
 @click.option('--project', default=None,
     help='Snapshot only the instances for the project')
 def create_snapshot(project):
@@ -116,10 +133,20 @@ def create_snapshot(project):
     instances = filter_instances(project)
 
     for i in instances:
+        print("Stopping {0}...".format(i.id))
         i.stop()
+        i.wait_until_stopped()
+
         for v in i.volumes.all():
+            if has_pending_snapshot(v):
+                print(" Skipping {0}, snapshot already in progress".format(v.id))
+                continue
             print("Creating snapshot of {0}".format(v.id))
             v.create_snapshot(Description="Created by SnapshotAlyzer 30000")
+        print("Starting {0}...".format(i.id))
+        i.start()
+        i.wait_until_running()
+        print("Jobs done!")
         return
 
 
